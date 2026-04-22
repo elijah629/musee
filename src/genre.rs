@@ -14,7 +14,7 @@ use crate::{
 };
 
 const MUSICBRAINZ_URL: &str = "https://musicbrainz.org/ws/2/recording";
-const USER_AGENT: &str = "musee/0.1.0 ( https://github.com/elijah629/musee )";
+const USER_AGENT: &str = "musee/0.2.0 ( https://github.com/elijah629/musee )";
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(1100);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
