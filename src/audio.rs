@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use metaflac::Tag;
+use tokio::task;
 use crate::text::{
     canonical_primary_artist, normalize_text, safe_name, track_prefix,
 };
@@ -20,6 +21,7 @@ pub struct TagUpdates {
     pub albumartist: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub genre: Option<String>,
     pub title: Option<String>,
 }
 
@@ -37,11 +39,19 @@ impl TagUpdates {
         self.albumartist.is_none()
             && self.artist.is_none()
             && self.album.is_none()
+            && self.genre.is_none()
             && self.title.is_none()
     }
 }
 
-pub fn read_track(path: &Path) -> Result<TrackMetadata> {
+pub async fn read_track(path: &Path) -> Result<TrackMetadata> {
+    let path = path.to_path_buf();
+    task::spawn_blocking(move || read_track_sync(&path))
+        .await
+        .context("track reader task failed")?
+}
+
+fn read_track_sync(path: &Path) -> Result<TrackMetadata> {
     let tag = Tag::read_from_path(path)
         .with_context(|| format!("failed to read FLAC tags {}", path.display()))?;
 
@@ -99,6 +109,7 @@ pub fn canonicalize(track: &TrackMetadata) -> CanonicalTrack {
         albumartist: (normalize_text(&track.albumartist, false) != albumartist).then(|| albumartist.clone()),
         artist: (normalize_text(&track.artist, false) != artist).then(|| artist.clone()),
         album: (!track.album.is_empty() && normalize_text(&track.album, false) != album).then(|| album.clone()),
+        genre: None,
         title: (!track.title.is_empty() && normalize_text(&track.title, false) != title).then(|| title.clone()),
     };
 
@@ -128,7 +139,15 @@ pub fn canonical_destination(root: &Path, track: &CanonicalTrack, ext: &str) -> 
     }
 }
 
-pub fn apply_updates(path: &Path, updates: &TagUpdates) -> Result<bool> {
+pub async fn apply_updates(path: &Path, updates: &TagUpdates) -> Result<bool> {
+    let path = path.to_path_buf();
+    let updates = updates.clone();
+    task::spawn_blocking(move || apply_updates_sync(&path, &updates))
+        .await
+        .context("tag writer task failed")?
+}
+
+fn apply_updates_sync(path: &Path, updates: &TagUpdates) -> Result<bool> {
     if updates.is_empty() {
         return Ok(false);
     }
@@ -141,7 +160,48 @@ pub fn apply_updates(path: &Path, updates: &TagUpdates) -> Result<bool> {
     changed |= set_field(comments, "ALBUMARTIST", updates.albumartist.as_deref());
     changed |= set_field(comments, "ARTIST", updates.artist.as_deref());
     changed |= set_field(comments, "ALBUM", updates.album.as_deref());
+    changed |= set_field(comments, "GENRE", updates.genre.as_deref());
     changed |= set_field(comments, "TITLE", updates.title.as_deref());
+
+    if changed {
+        tag.save()
+            .with_context(|| format!("failed to save FLAC tags {}", path.display()))?;
+    }
+
+    Ok(changed)
+}
+
+pub async fn read_genre(path: &Path) -> Result<Option<String>> {
+    let path = path.to_path_buf();
+    task::spawn_blocking(move || read_genre_sync(&path))
+        .await
+        .context("genre reader task failed")?
+}
+
+fn read_genre_sync(path: &Path) -> Result<Option<String>> {
+    let tag = Tag::read_from_path(path)
+        .with_context(|| format!("failed to read FLAC tags {}", path.display()))?;
+    let genre = first_text(&tag, &["GENRE"]);
+    if genre.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(genre))
+    }
+}
+
+pub async fn write_genre(path: &Path, genre: &str) -> Result<bool> {
+    let path = path.to_path_buf();
+    let genre = genre.to_string();
+    task::spawn_blocking(move || write_genre_sync(&path, &genre))
+        .await
+        .context("genre writer task failed")?
+}
+
+fn write_genre_sync(path: &Path, genre: &str) -> Result<bool> {
+    let mut tag = Tag::read_from_path(path)
+        .with_context(|| format!("failed to read FLAC tags {}", path.display()))?;
+    let comments = tag.vorbis_comments_mut();
+    let changed = set_field(comments, "GENRE", Some(genre));
 
     if changed {
         tag.save()

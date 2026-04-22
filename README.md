@@ -9,9 +9,16 @@ musee -s /mnt/nas/Music add /home/Music
 musee -s /mnt/nas/Music add --apply /home/Music
 musee -s /mnt/nas/Music repair
 musee -s /mnt/nas/Music repair --apply
+musee -s /mnt/nas/Music tag genre --all
+musee -s /mnt/nas/Music tag genre --all --apply
+musee tag genre /home/Music/Artist/Album
+musee tag genre /home/Music/file.flac --apply --retag
 ```
 
 Dry-run is default. `--apply` performs changes.
+
+`tag genre` does a best-effort online genre lookup from MusicBrainz.
+By default it skips files that already have a `GENRE` tag. Use `--retag` to replace existing genres.
 
 ## Install with flakes
 

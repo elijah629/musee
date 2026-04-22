@@ -1,61 +1,48 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use tokio::task;
+use walkdir::WalkDir;
 
-pub fn collect_files_recursive<F>(root: &Path, mut predicate: F) -> Result<Vec<PathBuf>>
-where
-    F: FnMut(&Path) -> bool,
-{
-    let mut out = Vec::new();
-    visit(root, &mut predicate, &mut out)?;
-    Ok(out)
-}
+pub async fn collect_files_recursive(root: &Path, predicate: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
+    let root = root.to_path_buf();
+    task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for entry in WalkDir::new(&root) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if err.io_error().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) => continue,
+                Err(err) => return Err(err).with_context(|| format!("failed while walking {}", root.display())),
+            };
 
-pub fn collect_dirs_recursive(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    visit_dirs(root, &mut out)?;
-    Ok(out)
-}
-
-fn visit<F>(path: &Path, predicate: &mut F, out: &mut Vec<PathBuf>) -> Result<()>
-where
-    F: FnMut(&Path) -> bool,
-{
-    let entries = fs::read_dir(path)
-        .with_context(|| format!("failed to read directory {}", path.display()))?;
-    for entry in entries {
-        let entry = entry
-            .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
-        let child = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("failed to read file type for {}", child.display()))?;
-        if file_type.is_dir() {
-            visit(&child, predicate, out)?;
-        } else if file_type.is_file() && predicate(&child) {
-            out.push(child);
+            let path = entry.path();
+            if entry.file_type().is_file() && predicate(path) {
+                out.push(path.to_path_buf());
+            }
         }
-    }
-    Ok(())
+        Ok(out)
+    })
+    .await
+    .context("file walker task failed")?
 }
 
-fn visit_dirs(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = fs::read_dir(path)
-        .with_context(|| format!("failed to read directory {}", path.display()))?;
-    for entry in entries {
-        let entry = entry
-            .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
-        let child = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("failed to read file type for {}", child.display()))?;
-        if file_type.is_dir() {
-            visit_dirs(&child, out)?;
-            out.push(child);
+pub async fn collect_dirs_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+    let root = root.to_path_buf();
+    task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for entry in WalkDir::new(&root).min_depth(1) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if err.io_error().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) => continue,
+                Err(err) => return Err(err).with_context(|| format!("failed while walking {}", root.display())),
+            };
+
+            if entry.file_type().is_dir() {
+                out.push(entry.into_path());
+            }
         }
-    }
-    Ok(())
+        Ok(out)
+    })
+    .await
+    .context("directory walker task failed")?
 }
