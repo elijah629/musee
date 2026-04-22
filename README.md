@@ -17,7 +17,8 @@ musee tag genre /home/Music/file.flac --apply --retag
 
 Dry-run is default. `--apply` performs changes.
 
-`tag genre` does a best-effort online genre lookup from MusicBrainz.
+`tag genre` does a best-effort online album-genre lookup from MusicBrainz.
+It chooses one genre per album, then writes that genre across the album's FLAC tracks.
 By default it skips files that already have a `GENRE` tag. Use `--retag` to replace existing genres.
 
 ## Install with flakes

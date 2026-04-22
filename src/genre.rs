@@ -13,20 +13,19 @@ use crate::{
     text::{canonical_primary_artist, normalize_text},
 };
 
-const MUSICBRAINZ_URL: &str = "https://musicbrainz.org/ws/2/recording";
-const USER_AGENT: &str = "musee/0.2.0 ( https://github.com/elijah629/musee )";
+const MUSICBRAINZ_RELEASE_GROUP_URL: &str = "https://musicbrainz.org/ws/2/release-group";
+const USER_AGENT: &str = "musee/0.3.0 ( https://github.com/elijah629/musee )";
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(1100);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct LookupKey {
+struct AlbumLookupKey {
     artist: String,
     album: String,
-    title: String,
 }
 
 pub struct GenreLookup {
     client: Client,
-    cache: HashMap<LookupKey, Option<String>>,
+    cache: HashMap<AlbumLookupKey, Option<String>>,
     last_request: Option<Instant>,
 }
 
@@ -45,12 +44,15 @@ impl GenreLookup {
         })
     }
 
-    pub async fn genre_for_track(&mut self, track: &TrackMetadata) -> Result<Option<String>> {
-        let key = LookupKey {
+    pub async fn genre_for_album(&mut self, track: &TrackMetadata) -> Result<Option<String>> {
+        let key = AlbumLookupKey {
             artist: normalize_text(&canonical_primary_artist(&track.albumartist), false),
             album: normalize_text(&track.album, false),
-            title: normalize_text(&track.title, false),
         };
+
+        if key.album == "Unknown" || key.album.is_empty() {
+            return Ok(None);
+        }
 
         if let Some(cached) = self.cache.get(&key) {
             return Ok(cached.clone());
@@ -60,16 +62,16 @@ impl GenreLookup {
         let query = build_query(&key);
         let response = self
             .client
-            .get(MUSICBRAINZ_URL)
+            .get(MUSICBRAINZ_RELEASE_GROUP_URL)
             .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "5")])
             .send()
             .await
-            .with_context(|| format!("genre lookup request failed for {}", key.title))?
+            .with_context(|| format!("genre lookup request failed for album {}", key.album))?
             .error_for_status()
-            .with_context(|| format!("genre lookup failed for {}", key.title))?
-            .json::<SearchResponse>()
+            .with_context(|| format!("genre lookup failed for album {}", key.album))?
+            .json::<ReleaseGroupSearchResponse>()
             .await
-            .with_context(|| format!("failed to decode genre lookup for {}", key.title))?;
+            .with_context(|| format!("failed to decode genre lookup for album {}", key.album))?;
         self.last_request = Some(Instant::now());
 
         let genre = choose_genre(response)
@@ -89,31 +91,28 @@ impl GenreLookup {
     }
 }
 
-fn build_query(key: &LookupKey) -> String {
-    let mut terms = vec![
-        format!("recording:\"{}\"", escape_query_value(&key.title)),
+fn build_query(key: &AlbumLookupKey) -> String {
+    [
+        format!("releasegroup:\"{}\"", escape_query_value(&key.album)),
         format!("artist:\"{}\"", escape_query_value(&key.artist)),
-    ];
-    if key.album != "Unknown" && !key.album.is_empty() {
-        terms.push(format!("release:\"{}\"", escape_query_value(&key.album)));
-    }
-    terms.join(" AND ")
+    ]
+    .join(" AND ")
 }
 
 fn escape_query_value(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', "\\\"")
 }
 
-fn choose_genre(response: SearchResponse) -> Option<String> {
+fn choose_genre(response: ReleaseGroupSearchResponse) -> Option<String> {
     let mut best_score = i64::MIN;
     let mut best_genre = None;
 
-    for recording in response.recordings {
-        let track_score = i64::from(recording.score.unwrap_or_default());
-        let Some(genre) = best_genre_in_recording(&recording) else {
+    for release_group in response.release_groups {
+        let result_score = i64::from(release_group.score.unwrap_or_default());
+        let Some(genre) = best_genre_in_release_group(&release_group) else {
             continue;
         };
-        let total_score = track_score * 1000 + i64::from(genre.count.unwrap_or_default());
+        let total_score = result_score * 1000 + i64::from(normalized_count(genre.count));
         if total_score > best_score {
             best_score = total_score;
             best_genre = Some(genre.name);
@@ -123,11 +122,11 @@ fn choose_genre(response: SearchResponse) -> Option<String> {
     best_genre
 }
 
-fn best_genre_in_recording(recording: &Recording) -> Option<GenreTag> {
-    let mut candidates = recording.genres.clone();
+fn best_genre_in_release_group(release_group: &ReleaseGroup) -> Option<GenreTag> {
+    let mut candidates = release_group.genres.clone();
     if candidates.is_empty() {
         candidates.extend(
-            recording
+            release_group
                 .tags
                 .iter()
                 .filter(|tag| looks_like_genre(&tag.name))
@@ -137,7 +136,7 @@ fn best_genre_in_recording(recording: &Recording) -> Option<GenreTag> {
 
     candidates
         .into_iter()
-        .max_by_key(|tag| (tag.count.unwrap_or_default(), tag.name.len()))
+        .max_by_key(|tag| (normalized_count(tag.count), tag.name.len()))
 }
 
 fn looks_like_genre(value: &str) -> bool {
@@ -200,13 +199,13 @@ fn title_case(value: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
-struct SearchResponse {
-    #[serde(default)]
-    recordings: Vec<Recording>,
+struct ReleaseGroupSearchResponse {
+    #[serde(default, rename = "release-groups")]
+    release_groups: Vec<ReleaseGroup>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Recording {
+struct ReleaseGroup {
     #[serde(default, deserialize_with = "deserialize_optional_score")]
     score: Option<u32>,
     #[serde(default)]
@@ -217,7 +216,8 @@ struct Recording {
 
 #[derive(Clone, Debug, Deserialize)]
 struct GenreTag {
-    count: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_optional_count")]
+    count: Option<i32>,
     name: String,
 }
 
@@ -236,24 +236,54 @@ where
     match value {
         None => Ok(None),
         Some(ScoreValue::Number(value)) => Ok(Some(value)),
-        Some(ScoreValue::Text(value)) => value.parse::<u32>().map(Some).map_err(serde::de::Error::custom),
+        Some(ScoreValue::Text(value)) => {
+            value.parse::<u32>().map(Some).map_err(serde::de::Error::custom)
+        }
     }
+}
+
+fn deserialize_optional_count<'de, D>(deserializer: D) -> std::result::Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum CountValue {
+        Signed(i32),
+        Unsigned(u32),
+        Text(String),
+    }
+
+    let value = Option::<CountValue>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(CountValue::Signed(value)) => Ok(Some(value)),
+        Some(CountValue::Unsigned(value)) => Ok(Some(value.min(i32::MAX as u32) as i32)),
+        Some(CountValue::Text(value)) => {
+            value.parse::<i32>().map(Some).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+fn normalized_count(count: Option<i32>) -> i32 {
+    count.unwrap_or_default().max(0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LookupKey, SearchResponse, build_query, choose_genre, normalize_genre_name};
+    use super::{
+        AlbumLookupKey, ReleaseGroupSearchResponse, build_query, choose_genre, normalize_genre_name,
+    };
 
     #[test]
-    fn builds_query_with_album_when_known() {
-        let key = LookupKey {
+    fn builds_album_query() {
+        let key = AlbumLookupKey {
             artist: "Artist".to_string(),
             album: "Album".to_string(),
-            title: "Song".to_string(),
         };
         assert_eq!(
             build_query(&key),
-            "recording:\"Song\" AND artist:\"Artist\" AND release:\"Album\""
+            "releasegroup:\"Album\" AND artist:\"Artist\""
         );
     }
 
@@ -265,8 +295,8 @@ mod tests {
 
     #[test]
     fn parses_score_from_string() {
-        let response: SearchResponse = serde_json::from_str(
-            r#"{"recordings":[{"score":"100","genres":[{"name":"hip hop","count":5}]}]}"#,
+        let response: ReleaseGroupSearchResponse = serde_json::from_str(
+            r#"{"release-groups":[{"score":"100","genres":[{"name":"hip hop","count":5}]}]}"#,
         )
         .expect("valid response");
         assert_eq!(choose_genre(response), Some("hip hop".to_string()));
@@ -274,9 +304,9 @@ mod tests {
 
     #[test]
     fn skips_hits_without_genre_and_uses_later_match() {
-        let response: SearchResponse = serde_json::from_str(
+        let response: ReleaseGroupSearchResponse = serde_json::from_str(
             r#"{
-                "recordings":[
+                "release-groups":[
                     {"score":"100","genres":[],"tags":[]},
                     {"score":"90","genres":[{"name":"jazz","count":7}],"tags":[]}
                 ]
@@ -284,5 +314,18 @@ mod tests {
         )
         .expect("valid response");
         assert_eq!(choose_genre(response), Some("jazz".to_string()));
+    }
+
+    #[test]
+    fn tolerates_negative_count_values() {
+        let response: ReleaseGroupSearchResponse = serde_json::from_str(
+            r#"{
+                "release-groups":[
+                    {"score":"100","genres":[{"name":"rock","count":-1}]}
+                ]
+            }"#,
+        )
+        .expect("valid response");
+        assert_eq!(choose_genre(response), Some("rock".to_string()));
     }
 }
