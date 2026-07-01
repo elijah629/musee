@@ -94,7 +94,9 @@ async fn copy_file(source: &Path, target: &Path, pb: &ProgressBar) -> Result<()>
         .await
         .with_context(|| format!("failed to create target file {}", target.display()))?;
 
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Keep the large transfer buffer off async state-machine stacks. Callers compose
+    // several transfer futures, and inline arrays can otherwise overflow the main stack.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = input
             .read(&mut buffer)

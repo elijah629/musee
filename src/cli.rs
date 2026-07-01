@@ -1,9 +1,13 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "musee", about = "Music library organizer and repair tool")]
+#[command(
+    name = "musee",
+    version,
+    about = "Music library organizer and repair tool"
+)]
 pub struct Cli {
     /// Music library root on server/NAS
     #[arg(short = 's', long = "server", value_name = "PATH", global = true)]
@@ -19,8 +23,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Add tagged FLAC files into canonical server library. Requires -s, --server.
+    /// Add tagged audio files into canonical server library. Requires -s, --server.
     Add(AddArgs),
+    /// Remove duplicate tracks and redundant album directories. Requires -s, --server.
+    Dedupe(DedupeArgs),
     /// Repair entire server library in place. Requires -s, --server.
     Repair(RepairArgs),
     /// Tag music files with derived metadata.
@@ -49,9 +55,38 @@ pub struct AddArgs {
     #[arg(long)]
     pub apply: bool,
 
-    /// One or more FLAC files/directories to import
+    /// Transcode every input with the selected encoding profile before import
+    #[arg(long, value_enum, value_name = "PROFILE")]
+    pub encoding: Option<EncodingProfile>,
+
+    /// Import tracks as an Unreleased album; missing metadata is replaced with Ye defaults
+    #[arg(long)]
+    pub unreleased: bool,
+
+    /// Override the artist used by --unreleased (default: Ye)
+    #[arg(long, value_name = "NAME", requires = "unreleased")]
+    pub unreleased_artist: Option<String>,
+
+    /// One or more audio files/directories to import
     #[arg(required = true, value_name = "SOURCE")]
     pub sources: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EncodingProfile {
+    /// Sonos-compatible FLAC: 16-bit, <=2 channels, 44.1/48 kHz, 100 seek points
+    SonosFlac,
+}
+
+#[derive(Debug, Args)]
+pub struct DedupeArgs {
+    /// Music library root on server/NAS
+    #[arg(from_global)]
+    pub server: Option<PathBuf>,
+
+    /// Apply changes. Default mode is dry-run.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 #[derive(Debug, Args)]

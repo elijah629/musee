@@ -1,11 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
+use crate::text::{canonical_primary_artist, normalize_text, safe_name, track_prefix};
 use anyhow::{Context, Result};
 use metaflac::Tag;
 use tokio::task;
-use crate::text::{
-    canonical_primary_artist, normalize_text, safe_name, track_prefix,
-};
 
 #[derive(Debug, Clone)]
 pub struct TrackMetadata {
@@ -14,6 +15,18 @@ pub struct TrackMetadata {
     pub album: String,
     pub title: String,
     pub tracknumber: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmbeddedLyrics {
+    pub tag_keys: Vec<String>,
+    pub content: String,
+}
+
+impl EmbeddedLyrics {
+    pub fn has_tags(&self) -> bool {
+        !self.tag_keys.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,21 +68,31 @@ fn read_track_sync(path: &Path) -> Result<TrackMetadata> {
     let tag = Tag::read_from_path(path)
         .with_context(|| format!("failed to read FLAC tags {}", path.display()))?;
 
-    let albumartist = first_text(&tag, &["ALBUMARTIST"]);
-    let artist = first_text(&tag, &["ARTIST"]);
-    let album = first_text(&tag, &["ALBUM"]);
-    let mut title = first_text(&tag, &["TITLE"]);
-    if title.is_empty() {
+    Ok(track_from_fields(
+        path,
+        first_text(&tag, &["ALBUMARTIST"]),
+        first_text(&tag, &["ARTIST"]),
+        first_text(&tag, &["ALBUM"]),
+        first_text(&tag, &["TITLE"]),
+        Some(first_text(&tag, &["TRACKNUMBER"])),
+    ))
+}
+
+pub fn track_from_fields(
+    path: &Path,
+    albumartist: String,
+    artist: String,
+    album: String,
+    mut title: String,
+    tracknumber: Option<String>,
+) -> TrackMetadata {
+    if title.trim().is_empty() {
         title = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| "Unknown".to_string());
     }
-    let tracknumber = {
-        let value = first_text(&tag, &["TRACKNUMBER"]);
-        (!value.is_empty()).then_some(value)
-    };
 
     let artist = if artist.trim().is_empty() {
         if albumartist.trim().is_empty() {
@@ -91,13 +114,13 @@ fn read_track_sync(path: &Path) -> Result<TrackMetadata> {
         albumartist
     };
 
-    Ok(TrackMetadata {
+    TrackMetadata {
         albumartist,
         artist,
         album,
         title,
-        tracknumber,
-    })
+        tracknumber: tracknumber.filter(|value| !value.trim().is_empty()),
+    }
 }
 
 pub fn canonicalize(track: &TrackMetadata) -> CanonicalTrack {
@@ -106,11 +129,14 @@ pub fn canonicalize(track: &TrackMetadata) -> CanonicalTrack {
     let album = normalize_text(&track.album, false);
     let title = normalize_text(&track.title, false);
     let tag_updates = TagUpdates {
-        albumartist: (normalize_text(&track.albumartist, false) != albumartist).then(|| albumartist.clone()),
+        albumartist: (normalize_text(&track.albumartist, false) != albumartist)
+            .then(|| albumartist.clone()),
         artist: (normalize_text(&track.artist, false) != artist).then(|| artist.clone()),
-        album: (!track.album.is_empty() && normalize_text(&track.album, false) != album).then(|| album.clone()),
+        album: (!track.album.is_empty() && normalize_text(&track.album, false) != album)
+            .then(|| album.clone()),
         genre: None,
-        title: (!track.title.is_empty() && normalize_text(&track.title, false) != title).then(|| title.clone()),
+        title: (!track.title.is_empty() && normalize_text(&track.title, false) != title)
+            .then(|| title.clone()),
     };
 
     CanonicalTrack {
@@ -147,6 +173,21 @@ pub async fn apply_updates(path: &Path, updates: &TagUpdates) -> Result<bool> {
         .context("tag writer task failed")?
 }
 
+pub async fn apply_updates_and_remove_lyrics(
+    path: &Path,
+    updates: &TagUpdates,
+    lyric_tag_keys: &[String],
+) -> Result<bool> {
+    let path = path.to_path_buf();
+    let updates = updates.clone();
+    let lyric_tag_keys = lyric_tag_keys.to_vec();
+    task::spawn_blocking(move || {
+        apply_updates_and_remove_lyrics_sync(&path, &updates, &lyric_tag_keys)
+    })
+    .await
+    .context("tag writer task failed")?
+}
+
 fn apply_updates_sync(path: &Path, updates: &TagUpdates) -> Result<bool> {
     if updates.is_empty() {
         return Ok(false);
@@ -169,6 +210,114 @@ fn apply_updates_sync(path: &Path, updates: &TagUpdates) -> Result<bool> {
     }
 
     Ok(changed)
+}
+
+fn apply_updates_and_remove_lyrics_sync(
+    path: &Path,
+    updates: &TagUpdates,
+    lyric_tag_keys: &[String],
+) -> Result<bool> {
+    if updates.is_empty() && lyric_tag_keys.is_empty() {
+        return Ok(false);
+    }
+
+    let mut tag = Tag::read_from_path(path)
+        .with_context(|| format!("failed to read FLAC tags {}", path.display()))?;
+    let comments = tag.vorbis_comments_mut();
+
+    let mut changed = false;
+    changed |= set_field(comments, "ALBUMARTIST", updates.albumartist.as_deref());
+    changed |= set_field(comments, "ARTIST", updates.artist.as_deref());
+    changed |= set_field(comments, "ALBUM", updates.album.as_deref());
+    changed |= set_field(comments, "GENRE", updates.genre.as_deref());
+    changed |= set_field(comments, "TITLE", updates.title.as_deref());
+    for key in lyric_tag_keys {
+        if comments.comments.contains_key(key) {
+            comments.remove(key);
+            changed = true;
+        }
+    }
+
+    if changed {
+        tag.save()
+            .with_context(|| format!("failed to save FLAC tags {}", path.display()))?;
+    }
+
+    Ok(changed)
+}
+
+pub async fn read_embedded_lyrics(path: &Path) -> Result<EmbeddedLyrics> {
+    let path = path.to_path_buf();
+    task::spawn_blocking(move || read_embedded_lyrics_sync(&path))
+        .await
+        .context("lyrics reader task failed")?
+}
+
+fn read_embedded_lyrics_sync(path: &Path) -> Result<EmbeddedLyrics> {
+    let tag = Tag::read_from_path(path)
+        .with_context(|| format!("failed to read FLAC tags {}", path.display()))?;
+    Ok(extract_embedded_lyrics(tag.vorbis_comments()))
+}
+
+fn extract_embedded_lyrics(comments: Option<&metaflac::block::VorbisComment>) -> EmbeddedLyrics {
+    let Some(comments) = comments else {
+        return EmbeddedLyrics::default();
+    };
+
+    let mut lyric_entries = comments
+        .comments
+        .iter()
+        .filter(|(key, _)| is_lyric_tag(key))
+        .collect::<Vec<_>>();
+    lyric_entries.sort_by_key(|(key, _)| *key);
+
+    let tag_keys = lyric_entries
+        .iter()
+        .map(|(key, _)| (*key).clone())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut values = Vec::new();
+    for (_, entry_values) in lyric_entries {
+        for value in entry_values {
+            let value = normalize_lrc_text(value);
+            if !value.trim().is_empty() && seen.insert(value.clone()) {
+                values.push(value);
+            }
+        }
+    }
+
+    let mut content = values.join("\n\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+
+    EmbeddedLyrics { tag_keys, content }
+}
+
+fn normalize_lrc_text(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_matches('\n')
+        .to_string()
+}
+
+fn is_lyric_tag(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "LYRIC"
+            | "LYRICS"
+            | "SYNCEDLYRIC"
+            | "SYNCEDLYRICS"
+            | "UNSYNCEDLYRIC"
+            | "UNSYNCEDLYRICS"
+            | "WMLYRICS"
+    )
 }
 
 pub async fn read_genre(path: &Path) -> Result<Option<String>> {
@@ -244,4 +393,33 @@ fn set_field(
     comments.remove(key);
     comments.set(key.to_string(), vec![value.to_string()]);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use metaflac::block::VorbisComment;
+
+    use super::{extract_embedded_lyrics, is_lyric_tag};
+
+    #[test]
+    fn recognizes_common_lyric_tag_names_only() {
+        assert!(is_lyric_tag("LYRICS"));
+        assert!(is_lyric_tag("unsynced lyrics"));
+        assert!(is_lyric_tag("WM/LYRICS"));
+        assert!(!is_lyric_tag("LYRICIST"));
+        assert!(!is_lyric_tag("LYRICS_LANGUAGE"));
+    }
+
+    #[test]
+    fn extracts_every_lyric_value_deterministically() {
+        let mut comments = VorbisComment::new();
+        comments.set("UNSYNCEDLYRICS", vec!["plain\r\nlyrics"]);
+        comments.set("LYRICS", vec!["[00:01.00]timed", "plain\r\nlyrics"]);
+        comments.set("ARTIST", vec!["Artist"]);
+
+        let lyrics = extract_embedded_lyrics(Some(&comments));
+
+        assert_eq!(lyrics.tag_keys, vec!["LYRICS", "UNSYNCEDLYRICS"]);
+        assert_eq!(lyrics.content, "[00:01.00]timed\n\nplain\nlyrics\n");
+    }
 }

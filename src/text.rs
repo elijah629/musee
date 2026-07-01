@@ -72,7 +72,12 @@ pub fn normalize_text(value: &str, filesystem_safe: bool) -> String {
     }
 
     while out.ends_with([' ', '.', '_']) {
-        if out.ends_with('_') && !out[..out.len() - 1].chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+        if out.ends_with('_')
+            && !out[..out.len() - 1]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric())
+        {
             break;
         }
         out.pop();
@@ -100,7 +105,11 @@ pub fn split_primary_artist(value: &str) -> String {
         } else if starts_word(bytes, i, b"with") {
             Some(4)
         } else if starts_word(bytes, i, b"feat") {
-            let extra = if bytes.get(i + 4) == Some(&b'.') { 1 } else { 0 };
+            let extra = if bytes.get(i + 4) == Some(&b'.') {
+                1
+            } else {
+                0
+            };
             Some(4 + extra)
         } else if starts_word(bytes, i, b"featuring") {
             Some(9)
@@ -136,7 +145,10 @@ pub fn safe_name(value: &str) -> String {
 
 pub fn track_prefix(tracknumber: Option<&str>) -> Option<String> {
     let tracknumber = tracknumber?;
-    let digits: String = tracknumber.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    let digits: String = tracknumber
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect();
     if digits.is_empty() {
         return None;
     }

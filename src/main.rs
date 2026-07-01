@@ -1,16 +1,17 @@
 mod audio;
 mod cli;
 mod commands;
+mod encoding;
 mod fsutil;
 mod genre;
 mod output;
 mod text;
 mod transfer;
 
+use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, TagTarget};
-use anyhow::Context;
 use tokio::runtime::Builder;
 
 fn main() -> Result<()> {
@@ -30,6 +31,13 @@ async fn async_main() -> Result<()> {
                 .as_deref()
                 .context("`musee add` requires -s, --server <PATH>")?;
             commands::add::run(server, &args).await
+        }
+        Commands::Dedupe(args) => {
+            let server = args
+                .server
+                .as_deref()
+                .context("`musee dedupe` requires -s, --server <PATH>")?;
+            commands::dedupe::run(server, &args).await
         }
         Commands::Repair(args) => {
             let server = args

@@ -85,7 +85,12 @@ pub async fn run(args: &TagArgs) -> Result<()> {
     let mut skipped_existing_files = 0_u64;
 
     for group in albums.values() {
-        if !args.retag && group.tracks.iter().all(|track| track.existing_genre.is_some()) {
+        if !args.retag
+            && group
+                .tracks
+                .iter()
+                .all(|track| track.existing_genre.is_some())
+        {
             skipped_existing_albums += 1;
             skipped_existing_files += group.tracks.len() as u64;
             lookup_pb.inc(1);
@@ -136,12 +141,9 @@ pub async fn run(args: &TagArgs) -> Result<()> {
     if !args.apply {
         for plan in &plans {
             match &plan.existing_genre {
-                Some(existing) => println!(
-                    "TAG {} {} -> {}",
-                    plan.path.display(),
-                    existing,
-                    plan.genre
-                ),
+                Some(existing) => {
+                    println!("TAG {} {} -> {}", plan.path.display(), existing, plan.genre)
+                }
                 None => println!("TAG {} -> {}", plan.path.display(), plan.genre),
             }
         }
@@ -226,10 +228,10 @@ async fn collect_sources(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 fn describe_scope(args: &TagArgs) -> PathBuf {
-    if let Some(server) = &args.server {
-        if args.all || args.sources.is_empty() {
-            return server.clone();
-        }
+    if let Some(server) = &args.server
+        && (args.all || args.sources.is_empty())
+    {
+        return server.clone();
     }
 
     if args.sources.len() == 1 {

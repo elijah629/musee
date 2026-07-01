@@ -23,7 +23,7 @@
       packages = forAllSystems ({ pkgs, ... }: rec {
         musee = pkgs.rustPlatform.buildRustPackage {
           pname = "musee";
-          version = "0.3.0";
+          version = "0.4.0";
 
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
@@ -37,6 +37,13 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
           };
+
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+
+          postInstall = ''
+            wrapProgram $out/bin/musee \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ffmpeg-headless pkgs.flac ]}
+          '';
 
           meta = with pkgs.lib; {
             description = "Music library organizer and repair CLI";

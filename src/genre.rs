@@ -236,9 +236,10 @@ where
     match value {
         None => Ok(None),
         Some(ScoreValue::Number(value)) => Ok(Some(value)),
-        Some(ScoreValue::Text(value)) => {
-            value.parse::<u32>().map(Some).map_err(serde::de::Error::custom)
-        }
+        Some(ScoreValue::Text(value)) => value
+            .parse::<u32>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
     }
 }
 
@@ -259,9 +260,10 @@ where
         None => Ok(None),
         Some(CountValue::Signed(value)) => Ok(Some(value)),
         Some(CountValue::Unsigned(value)) => Ok(Some(value.min(i32::MAX as u32) as i32)),
-        Some(CountValue::Text(value)) => {
-            value.parse::<i32>().map(Some).map_err(serde::de::Error::custom)
-        }
+        Some(CountValue::Text(value)) => value
+            .parse::<i32>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
     }
 }
 
